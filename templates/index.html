@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>USD Tracker Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <!-- Load Chart.js from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="dark-mode">
+  <header>
+    <h1>USD Tracker Dashboard</h1>
+    <div class="toggle-container">
+      <label class="switch">
+        <input type="checkbox" id="modeToggle" checked>
+        <span class="slider round"></span>
+      </label>
+      <span id="modeLabel">Dark Mode</span>
+    </div>
+  </header>
+
+  <div class="container">
+    <!-- Actual Exchange Rates Section -->
+    <section class="chart-section">
+      <h2>Actual Exchange Rates (USD vs. CAD, MXN, CNY & JPY)</h2>
+      <div class="chart-container">
+        <canvas id="currencyChart"></canvas>
+      </div>
+      <p class="chart-description">
+        This chart displays real exchange rate data over the selected time period.
+      </p>
+    </section>
+
+    <!-- USD Strength Index Section -->
+    <section class="chart-section">
+      <h2>USD Strength Index (Composite)</h2>
+      <div class="chart-container">
+        <canvas id="strengthChart"></canvas>
+      </div>
+      <p class="chart-description">
+        The composite index is the average of the normalized values for USD vs. CAD, MXN, CNY, and JPY.
+      </p>
+    </section>
+
+    <!-- Normalized Currency Strength Section -->
+    <section class="chart-section">
+      <h2>Currency Strength (Normalized Values)</h2>
+      <div class="chart-container">
+        <canvas id="normalizedChart"></canvas>
+      </div>
+      <p class="chart-description">
+        This chart shows the normalized strength for each currency individually.
+      </p>
+    </section>
+
+    <!-- Historical Analysis Section with Time Range Dropdown -->
+    <section class="chart-section">
+      <h2>Historical Analysis</h2>
+      <label for="timeRangeSelect">Select Time Range:</label>
+      <select id="timeRangeSelect">
+        <option value="24h">24 Hours</option>
+        <option value="7d">7 Days</option>
+        <option value="30d" selected>30 Days</option>
+      </select>
+      <div id="analysis" class="analysis-section"></div>
+    </section>
+
+    <!-- Forex News Section -->
+    <section class="chart-section">
+      <h2>Latest Forex News</h2>
+      <div id="news" class="news-section"></div>
+    </section>
+  </div>
+
+  <!-- Background Music (hidden controls) -->
+  <audio id="bgMusic" src="/static/sounds/bgm.mp3" loop></audio>
+
+  <script src="/static/scripts.js"></script>
+</body>
+</html>
