@@ -18,6 +18,10 @@ The Currency Tracker Application is a Flask-based web app that displays real-tim
   Run the entire application stack using Docker Compose.
 - **Minimal Setup:**  
   The only required configuration is setting your News API key via a `.env` file.
+
+
+
+
 Application Endpoints
 /
 Renders the main index page.
