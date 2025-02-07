@@ -2,46 +2,51 @@ from flask import Flask, render_template, jsonify, request
 import requests
 import os
 import datetime
+import logging
+import atexit
 
-# Flask-Limiter for rate limiting
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-
-# Flask-Caching for caching endpoints
 from flask_caching import Cache
-
-# Flask-SQLAlchemy for database logging
 from flask_sqlalchemy import SQLAlchemy
-
-# APScheduler for background jobs
 from apscheduler.schedulers.background import BackgroundScheduler
 
+# -----------------------
+# Logging Configuration
+# -----------------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# -----------------------
+# Flask Application Setup
+# -----------------------
 app = Flask(__name__)
 
-# -----------------------
-# Configuration
-# -----------------------
-
-# Rate Limiter configuration
-limiter = Limiter(
-    key_func=get_remote_address,
-    default_limits=["100 per hour"]  # 100 requests per hour per IP
-)
+# Rate Limiter: 100 requests per hour per IP
+# For production, consider setting REDIS_URL in your environment to use persistent storage.
+REDIS_URL = os.environ.get("REDIS_URL")
+if REDIS_URL:
+    limiter = Limiter(
+        key_func=get_remote_address,
+        default_limits=["100 per hour"],
+        storage_uri=REDIS_URL
+    )
+else:
+    limiter = Limiter(key_func=get_remote_address, default_limits=["100 per hour"])
 limiter.init_app(app)
 
-# Caching configuration (in-memory cache, 10 minutes timeout)
+# Caching configuration (in-memory cache with a 10-minute timeout)
 cache = Cache(app, config={'CACHE_TYPE': 'SimpleCache', 'CACHE_DEFAULT_TIMEOUT': 600})
 
 # Database configuration (using SQLite)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///data.db'
+# Using an absolute path so that the DB file is stored in /app/data inside the container.
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:////app/data/data.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 # -----------------------
-# Models
+# Database Model
 # -----------------------
-
-# Model for logging currency data (for historical tracking)
 class LogEntry(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
@@ -50,13 +55,6 @@ class LogEntry(db.Model):
     usd_to_cny = db.Column(db.Float, nullable=False)
     usd_to_jpy = db.Column(db.Float, nullable=False)
     bitcoin_price = db.Column(db.Float, nullable=False)
-
-# Model for Flappy Bird high scores (if needed; not used if game is removed)
-class FlappyScore(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    player_name = db.Column(db.String(50), nullable=False)
-    score = db.Column(db.Integer, nullable=False)
-    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
 with app.app_context():
     db.create_all()
@@ -80,44 +78,72 @@ def get_bitcoin_price():
         response = requests.get("https://api.coindesk.com/v1/bpi/currentprice.json")
         data = response.json()
         return data["bpi"]["USD"]["rate_float"]
-    except Exception:
+    except Exception as e:
+        logger.error("Error fetching Bitcoin price: %s", e)
         return 0
 
 def log_currency_data():
     """
-    Fetch current exchange rates (USD vs. CAD, MXN, CNY, JPY) and Bitcoin price,
-    then log them to the database.
+    Fetch current exchange rates and Bitcoin price,
+    then log these values to the database.
+    This function is wrapped in an application context so it works correctly with APScheduler.
     """
-    try:
-        response = requests.get(CURRENCY_API_URL)
-        data = response.json()
-        usd_to_cad = data.get("rates", {}).get("CAD")
-        usd_to_mxn = data.get("rates", {}).get("MXN")
-        usd_to_cny = data.get("rates", {}).get("CNY")
-        usd_to_jpy = data.get("rates", {}).get("JPY")
-        bitcoin_price = get_bitcoin_price()
+    with app.app_context():
+        try:
+            response = requests.get(CURRENCY_API_URL)
+            data = response.json()
+            rates = data.get("rates", {})
+            usd_to_cad = rates.get("CAD")
+            usd_to_mxn = rates.get("MXN")
+            usd_to_cny = rates.get("CNY")
+            usd_to_jpy = rates.get("JPY")
+            bitcoin_price = get_bitcoin_price()
 
-        new_log = LogEntry(
-            usd_to_cad=usd_to_cad,
-            usd_to_mxn=usd_to_mxn,
-            usd_to_cny=usd_to_cny,
-            usd_to_jpy=usd_to_jpy,
-            bitcoin_price=bitcoin_price
-        )
-        db.session.add(new_log)
-        db.session.commit()
-    except Exception as e:
-        print("Error logging currency data:", e)
+            new_log = LogEntry(
+                usd_to_cad=usd_to_cad,
+                usd_to_mxn=usd_to_mxn,
+                usd_to_cny=usd_to_cny,
+                usd_to_jpy=usd_to_jpy,
+                bitcoin_price=bitcoin_price
+            )
+            db.session.add(new_log)
+            db.session.commit()
+            logger.info(
+                "Logged data at %s: CAD=%s, MXN=%s, CNY=%s, JPY=%s, BTC=%s",
+                datetime.datetime.utcnow(), usd_to_cad, usd_to_mxn, usd_to_cny, usd_to_jpy, bitcoin_price
+            )
+        except Exception as e:
+            logger.error("Error logging currency data: %s", e)
+
+def compute_stats(values):
+    """Compute statistics (first, latest, highest, lowest, percent change, trend) from a list of values."""
+    if not values:
+        return {}
+    first = values[0]
+    last = values[-1]
+    highest = max(values)
+    lowest = min(values)
+    percent_change = ((last - first) / first * 100) if first != 0 else 0
+    trend = "strengthening" if last > first else "weakening"
+    return {
+        "first": first,
+        "latest": last,
+        "highest": highest,
+        "lowest": lowest,
+        "percent_change": round(percent_change, 2),
+        "trend": trend
+    }
 
 # -----------------------
 # APScheduler: Periodic Data Logging
 # -----------------------
 scheduler = BackgroundScheduler()
-scheduler.add_job(func=log_currency_data, trigger="interval", minutes=10)
+scheduler.add_job(func=log_currency_data, trigger="interval", minutes=15)
 scheduler.start()
+atexit.register(lambda: scheduler.shutdown())
 
 # -----------------------
-# Routes: USD Tracking & Analysis
+# Routes
 # -----------------------
 @app.route("/")
 def index():
@@ -125,24 +151,22 @@ def index():
 
 @app.route("/currency-data")
 @limiter.limit("50 per hour")
-@cache.cached()  # Cache current data for 10 minutes
 def currency_data():
     """
-    Fetch current exchange rates for USD vs. CAD, MXN, CNY, and JPY,
-    along with the current Bitcoin price.
-    Generate a 3-day sample (with slight random variations for demonstration).
-    (Note: The scheduled job is logging real data periodically.)
+    Fetch current exchange rates and Bitcoin price,
+    then generate a simulated 3-day history for demonstration.
     """
     try:
         response = requests.get(CURRENCY_API_URL)
         data = response.json()
-        usd_to_cad = data.get("rates", {}).get("CAD")
-        usd_to_mxn = data.get("rates", {}).get("MXN")
-        usd_to_cny = data.get("rates", {}).get("CNY")
-        usd_to_jpy = data.get("rates", {}).get("JPY")
+        rates = data.get("rates", {})
+        usd_to_cad = rates.get("CAD")
+        usd_to_mxn = rates.get("MXN")
+        usd_to_cny = rates.get("CNY")
+        usd_to_jpy = rates.get("JPY")
         bitcoin_price = get_bitcoin_price()
 
-        # Generate a 3-day sample (for display purposes only)
+        # Generate simulated 3-day history for demonstration
         import random
         cad_history = [
             round(usd_to_cad - random.uniform(0, 0.02), 4),
@@ -165,31 +189,15 @@ def currency_data():
             usd_to_jpy
         ]
 
-        # Determine trends (using the simulated sample)
         cad_trend = "strengthening" if cad_history[2] > cad_history[1] else "weakening"
         mxn_trend = "strengthening" if mxn_history[2] > mxn_history[1] else "weakening"
         cny_trend = "strengthening" if cny_history[2] > cny_history[1] else "weakening"
         jpy_trend = "strengthening" if jpy_history[2] > jpy_history[1] else "weakening"
 
-        cad_analysis = (
-            "The USD is strengthening vs. CAD. This may benefit consumers but hurt exporters."
-            if cad_trend == "strengthening" else
-            "The USD is weakening vs. CAD. Exporters might benefit."
-        )
-        mxn_analysis = (
-            "The USD is strengthening vs. MXN. This may benefit consumers but hurt exporters."
-            if mxn_trend == "strengthening" else
-            "The USD is weakening vs. MXN. Exporters might benefit."
-        )
-        cny_analysis = (
-            "The USD is strengthening vs. CNY. This may benefit consumers but hurt exporters."
-            if cny_trend == "strengthening" else
-            "The USD is weakening vs. CNY. Exporters might benefit."
-        )
-        jpy_analysis = (
-            "The USD is strengthening vs. JPY. This may benefit consumers but hurt exporters."
-            if jpy_trend == "strengthening" else
-            "The USD is weakening vs. JPY. Exporters might benefit."
+        analysis_text = lambda currency, trend: (
+            f"The USD is strengthening vs. {currency}. This may benefit consumers but hurt exporters."
+            if trend == "strengthening"
+            else f"The USD is weakening vs. {currency}. Exporters might benefit."
         )
 
         return jsonify({
@@ -197,142 +205,101 @@ def currency_data():
                 "current": usd_to_cad,
                 "history": cad_history,
                 "trend": cad_trend,
-                "analysis": cad_analysis
+                "analysis": analysis_text("CAD", cad_trend)
             },
             "MXN": {
                 "current": usd_to_mxn,
                 "history": mxn_history,
                 "trend": mxn_trend,
-                "analysis": mxn_analysis
+                "analysis": analysis_text("MXN", mxn_trend)
             },
             "CNY": {
                 "current": usd_to_cny,
                 "history": cny_history,
                 "trend": cny_trend,
-                "analysis": cny_analysis
+                "analysis": analysis_text("CNY", cny_trend)
             },
             "JPY": {
                 "current": usd_to_jpy,
                 "history": jpy_history,
                 "trend": jpy_trend,
-                "analysis": jpy_analysis
+                "analysis": analysis_text("JPY", jpy_trend)
             },
             "Bitcoin": {
                 "current": bitcoin_price
             }
         })
     except Exception as e:
+        logger.error("Error in /currency-data endpoint: %s", e)
         return jsonify({"error": str(e)}), 500
 
 @app.route("/historical-data/24h")
 def historical_data_24h():
-    """
-    Retrieve historical currency data for the past 24 hours.
-    """
     try:
         time_limit = datetime.datetime.utcnow() - datetime.timedelta(hours=24)
         logs = LogEntry.query.filter(LogEntry.timestamp >= time_limit).order_by(LogEntry.timestamp).all()
         if not logs:
             return jsonify({"error": "No historical data available for 24 hours"}), 404
-        dates = [log.timestamp.strftime("%Y-%m-%d %H:%M") for log in logs]
-        cad = [log.usd_to_cad for log in logs]
-        mxn = [log.usd_to_mxn for log in logs]
-        cny = [log.usd_to_cny for log in logs]
-        jpy = [log.usd_to_jpy for log in logs]
-        btc = [log.bitcoin_price for log in logs]
-        return jsonify({
-            "dates": dates,
-            "cad": cad,
-            "mxn": mxn,
-            "cny": cny,
-            "jpy": jpy,
-            "bitcoin": btc
-        })
+        data = {
+            "dates": [log.timestamp.strftime("%Y-%m-%d %H:%M") for log in logs],
+            "cad": [log.usd_to_cad for log in logs],
+            "mxn": [log.usd_to_mxn for log in logs],
+            "cny": [log.usd_to_cny for log in logs],
+            "jpy": [log.usd_to_jpy for log in logs],
+            "bitcoin": [log.bitcoin_price for log in logs]
+        }
+        return jsonify(data)
     except Exception as e:
+        logger.error("Error in /historical-data/24h endpoint: %s", e)
         return jsonify({"error": str(e)}), 500
 
 @app.route("/historical-data/7d")
 def historical_data_7d():
-    """
-    Retrieve historical currency data for the past 7 days.
-    """
     try:
         time_limit = datetime.datetime.utcnow() - datetime.timedelta(days=7)
         logs = LogEntry.query.filter(LogEntry.timestamp >= time_limit).order_by(LogEntry.timestamp).all()
         if not logs:
             return jsonify({"error": "No historical data available for 7 days"}), 404
-        dates = [log.timestamp.strftime("%Y-%m-%d %H:%M") for log in logs]
-        cad = [log.usd_to_cad for log in logs]
-        mxn = [log.usd_to_mxn for log in logs]
-        cny = [log.usd_to_cny for log in logs]
-        jpy = [log.usd_to_jpy for log in logs]
-        btc = [log.bitcoin_price for log in logs]
-        return jsonify({
-            "dates": dates,
-            "cad": cad,
-            "mxn": mxn,
-            "cny": cny,
-            "jpy": jpy,
-            "bitcoin": btc
-        })
+        data = {
+            "dates": [log.timestamp.strftime("%Y-%m-%d %H:%M") for log in logs],
+            "cad": [log.usd_to_cad for log in logs],
+            "mxn": [log.usd_to_mxn for log in logs],
+            "cny": [log.usd_to_cny for log in logs],
+            "jpy": [log.usd_to_jpy for log in logs],
+            "bitcoin": [log.bitcoin_price for log in logs]
+        }
+        return jsonify(data)
     except Exception as e:
+        logger.error("Error in /historical-data/7d endpoint: %s", e)
         return jsonify({"error": str(e)}), 500
 
-# Default historical data endpoint returns 30 days of data.
 @app.route("/historical-data")
 def historical_data_30d():
-    """
-    Retrieve historical currency data for the past 30 days.
-    """
     try:
         time_limit = datetime.datetime.utcnow() - datetime.timedelta(days=30)
         logs = LogEntry.query.filter(LogEntry.timestamp >= time_limit).order_by(LogEntry.timestamp).all()
         if not logs:
             return jsonify({"error": "No historical data available for 30 days"}), 404
-        dates = [log.timestamp.strftime("%Y-%m-%d") for log in logs]
-        cad = [log.usd_to_cad for log in logs]
-        mxn = [log.usd_to_mxn for log in logs]
-        cny = [log.usd_to_cny for log in logs]
-        jpy = [log.usd_to_jpy for log in logs]
-        btc = [log.bitcoin_price for log in logs]
-        return jsonify({
-            "dates": dates,
-            "cad": cad,
-            "mxn": mxn,
-            "cny": cny,
-            "jpy": jpy,
-            "bitcoin": btc
-        })
+        data = {
+            "dates": [log.timestamp.strftime("%Y-%m-%d") for log in logs],
+            "cad": [log.usd_to_cad for log in logs],
+            "mxn": [log.usd_to_mxn for log in logs],
+            "cny": [log.usd_to_cny for log in logs],
+            "jpy": [log.usd_to_jpy for log in logs],
+            "bitcoin": [log.bitcoin_price for log in logs]
+        }
+        return jsonify(data)
     except Exception as e:
+        logger.error("Error in /historical-data (30d) endpoint: %s", e)
         return jsonify({"error": str(e)}), 500
 
 @app.route("/analysis")
 def analysis():
-    """
-    Compute historical trends from the past month's logs for each metric:
-      - First value, Latest value, Highest, Lowest, Percent Change, and Trend.
-    """
     try:
         one_month_ago = datetime.datetime.utcnow() - datetime.timedelta(days=30)
         logs = LogEntry.query.filter(LogEntry.timestamp >= one_month_ago).order_by(LogEntry.timestamp).all()
         if not logs:
             return jsonify({"error": "Not enough data for analysis"}), 404
-
-        def compute_stats(values):
-            first = values[0]
-            last = values[-1]
-            highest = max(values)
-            lowest = min(values)
-            percent_change = ((last - first) / first * 100) if first != 0 else 0
-            trend = "strengthening" if last > first else "weakening"
-            return {
-                "first": first,
-                "latest": last,
-                "highest": highest,
-                "lowest": lowest,
-                "percent_change": round(percent_change, 2),
-                "trend": trend
-            }
 
         cad_stats = compute_stats([log.usd_to_cad for log in logs])
         mxn_stats = compute_stats([log.usd_to_mxn for log in logs])
@@ -348,17 +315,14 @@ def analysis():
             "Bitcoin": btc_stats
         })
     except Exception as e:
+        logger.error("Error in /analysis endpoint: %s", e)
         return jsonify({"error": str(e)}), 500
 
 @app.route("/news")
 @limiter.limit("10 per minute")
 def news():
-    """
-    Fetch the latest forex/currency exchange news articles.
-    """
-    query = "forex currency exchange"
     params = {
-        "q": query,
+        "q": "forex currency exchange",
         "apiKey": NEWS_API_KEY,
         "sortBy": "publishedAt",
         "language": "en",
@@ -366,20 +330,75 @@ def news():
     }
     try:
         news_response = requests.get(NEWS_API_URL, params=params)
+        news_response.raise_for_status()
+        try:
+            data = news_response.json()
+        except ValueError as json_err:
+            logger.error("Error parsing JSON from news API. Response text: %s", news_response.text)
+            return jsonify({"error": "Failed to parse JSON from news API"}), 500
+
         if news_response.status_code == 429:
             return jsonify({"error": "External News API rate limit reached. Please try again later."}), 429
-        articles = news_response.json().get("articles", [])
+
+        articles = data.get("articles", [])
         return jsonify(articles)
     except Exception as e:
+        logger.error("Error fetching news: %s", e)
         return jsonify({"error": str(e)}), 500
 
+@app.route("/debug")
+def debug():
+    logs = LogEntry.query.order_by(LogEntry.timestamp.desc()).all()
+    # Determine scheduler status
+    from apscheduler.schedulers.base import STATE_RUNNING, STATE_PAUSED, STATE_STOPPED
+    if scheduler.state == STATE_RUNNING:
+        scheduler_status = "Running"
+    elif scheduler.state == STATE_PAUSED:
+        scheduler_status = "Paused"
+    elif scheduler.state == STATE_STOPPED:
+        scheduler_status = "Stopped"
+    else:
+        scheduler_status = "Unknown"
+
+    html = "<h1>Debug Information</h1>"
+    html += "<h2>Database Log Entries</h2>"
+    if logs:
+        html += """
+        <table border="1" cellpadding="5" cellspacing="0">
+            <tr>
+                <th>ID</th>
+                <th>Timestamp</th>
+                <th>USD to CAD</th>
+                <th>USD to MXN</th>
+                <th>USD to CNY</th>
+                <th>USD to JPY</th>
+                <th>Bitcoin Price</th>
+            </tr>
+        """
+        for entry in logs:
+            html += f"""
+                <tr>
+                    <td>{entry.id}</td>
+                    <td>{entry.timestamp}</td>
+                    <td>{entry.usd_to_cad}</td>
+                    <td>{entry.usd_to_mxn}</td>
+                    <td>{entry.usd_to_cny}</td>
+                    <td>{entry.usd_to_jpy}</td>
+                    <td>{entry.bitcoin_price}</td>
+                </tr>
+            """
+        html += "</table>"
+    else:
+        html += "<p>No log entries found.</p>"
+    html += f"<h2>Scheduler Status</h2><p>{scheduler_status}</p>"
+    html += "<h2>Application Logs</h2><p>Check your server console or log file for application logs.</p>"
+    return html
 
 # -----------------------
-# Shutdown Scheduler on Exit
+# Application Entry Point
 # -----------------------
-import atexit
-atexit.register(lambda: scheduler.shutdown())
-
 if __name__ == "__main__":
-    # In production, run this app using a production-ready WSGI server (e.g., Gunicorn)
+    # Log currency data once on startup (wrapped in app context)
+    with app.app_context():
+        log_currency_data()
     app.run(host="0.0.0.0", debug=False, use_reloader=False)

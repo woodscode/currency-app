@@ -5,4 +5,22 @@ services:
       - "5000:5000"
     environment:
       - FLASK_ENV=production
-      - NEWS_API_KEY=
+      - NEWS_API_KEY=${NEWS_API_KEY}
+      - REDIS_URL=redis://redis:6379/0
+      - SERVER_TIMEZONE=UTC
+    depends_on:
+      - redis
+    volumes:
+      - ./data:/app/data
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+   # sysctls:
+   #   vm.overcommit_memory: "1"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:

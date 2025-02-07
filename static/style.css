@@ -158,8 +158,3 @@ input:checked + .slider:before {
 .news-article a:hover {
     text-decoration: underline;
 }
-
-/* Background Music: hidden controls */
-#audioPlayer {
-    display: none;
-}
