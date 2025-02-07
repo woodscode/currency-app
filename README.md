@@ -18,22 +18,6 @@ The Currency Tracker Application is a Flask-based web app that displays real-tim
   Run the entire application stack using Docker Compose.
 - **Minimal Setup:**  
   The only required configuration is setting your News API key via a `.env` file.
-
-## Prerequisites
-
-- [Docker](https://www.docker.com/)
-- [Docker Compose](https://docs.docker.com/compose/)
-
-## Getting Started
-
-### 1. Clone the Repository
-
-Open your terminal and run:
-
-```bash
-git clone https://github.com/your-username/currency-app.git
-cd currency-app
-
 Application Endpoints
 /
 Renders the main index page.
@@ -58,3 +42,19 @@ Retrieves recent news articles related to currency exchange (rate limited to 10 
 
 /debug
 Displays a debug page with information on database log entries and the scheduler status.
+
+## Prerequisites
+
+- [Docker](https://www.docker.com/)
+- [Docker Compose](https://docs.docker.com/compose/)
+
+## Getting Started
+
+### 1. Clone the Repository
+
+Open your terminal and run:
+
+```bash
+git clone https://github.com/your-username/currency-app.git
+cd currency-app
+
