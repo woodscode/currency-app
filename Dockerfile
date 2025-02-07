@@ -4,6 +4,9 @@ FROM python:3.9-alpine
 # Set the working directory in the container
 WORKDIR /app
 
+# Create Data Directory
+RUN mkdir -p /app/data
+
 # Install build dependencies (required for some Python packages)
 RUN apk add --no-cache gcc musl-dev linux-headers
 
